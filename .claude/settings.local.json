@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C D:/GithubCodes/claude-code-gpt-proxy:*)"
+      "Bash(git -C D:/GithubCodes/claude-code-gpt-proxy:*)",
+      "Bash(git -C \"D:\\\\GithubCodes\\\\claude-code-azure-gpt-proxy\" ls-files)"
     ]
   }
 }

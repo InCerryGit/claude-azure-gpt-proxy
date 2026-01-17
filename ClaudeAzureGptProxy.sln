@@ -1,10 +1,8 @@
-Microsoft Visual Studio Solution File, Format Version 12.00
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClaudeCodeAzureGptProxy", "ClaudeCodeAzureGptProxy.csproj", "{66D332F0-9D76-83E8-5977-9095A758DEC1}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClaudeCodeAzureGptProxy.Tests", "ClaudeCodeAzureGptProxy.Tests\ClaudeCodeAzureGptProxy.Tests.csproj", "{9BF5171B-33CA-F977-C8C5-DAD8FA4AC240}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClaudeAzureGptProxy", "ClaudeAzureGptProxy.csproj", "{66D332F0-9D76-83E8-5977-9095A758DEC1}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -16,10 +14,6 @@ Global
 		{66D332F0-9D76-83E8-5977-9095A758DEC1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{66D332F0-9D76-83E8-5977-9095A758DEC1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{66D332F0-9D76-83E8-5977-9095A758DEC1}.Release|Any CPU.Build.0 = Release|Any CPU
-		{9BF5171B-33CA-F977-C8C5-DAD8FA4AC240}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{9BF5171B-33CA-F977-C8C5-DAD8FA4AC240}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{9BF5171B-33CA-F977-C8C5-DAD8FA4AC240}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{9BF5171B-33CA-F977-C8C5-DAD8FA4AC240}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

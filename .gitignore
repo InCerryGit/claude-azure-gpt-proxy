@@ -38,4 +38,7 @@ tmp
 # Windows special device name (accidentally created file)
 nul
 
+# Environment files
+.env
+
 /old

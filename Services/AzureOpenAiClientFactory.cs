@@ -1,9 +1,9 @@
-using ClaudeCodeAzureGptProxy.Infrastructure;
 using Microsoft.Extensions.Options;
 using OpenAI;
 using System.ClientModel;
+using ClaudeAzureGptProxy.Infrastructure;
 
-namespace ClaudeCodeAzureGptProxy.Services;
+namespace ClaudeAzureGptProxy.Services;
 
 public sealed class AzureOpenAiClientFactory
 {

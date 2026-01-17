@@ -1,18 +1,29 @@
+using System.Linq;
 using System.Text.Json;
-using ClaudeCodeAzureGptProxy.Models;
+using ClaudeAzureGptProxy.Models;
 using Microsoft.Extensions.Logging;
 using OpenAI.Chat;
 
-namespace ClaudeCodeAzureGptProxy.Services;
+namespace ClaudeAzureGptProxy.Services;
 
 public static class SseStreaming
 {
+    public sealed class StreamStats
+    {
+        public int ChunkCount { get; set; }
+        public int EventCount { get; set; }
+        public int OutputCharacters { get; set; }
+        public int InputTokens { get; set; }
+        public int OutputTokens { get; set; }
+        public string? StopReason { get; set; }
+    }
+
     private static string EmitEvent(string eventType, object payload)
     {
         return $"event: {eventType}\ndata: {JsonSerializer.Serialize(payload)}\n\n";
     }
 
-    private static string EmitMessageStart(string messageId, string responseModel)
+    private static string EmitMessageStart(string messageId, string responseModel, int inputTokens, int outputTokens)
     {
         var messageData = new
         {
@@ -28,10 +39,10 @@ public static class SseStreaming
                 stop_sequence = (string?)null,
                 usage = new
                 {
-                    input_tokens = 0,
+                    input_tokens = inputTokens,
                     cache_creation_input_tokens = 0,
                     cache_read_input_tokens = 0,
-                    output_tokens = 0
+                    output_tokens = outputTokens
                 }
             }
         };
@@ -96,14 +107,18 @@ public static class SseStreaming
     public static async IAsyncEnumerable<string> HandleStreaming(
         IAsyncEnumerable<Dictionary<string, object?>> responseStream,
         MessagesRequest originalRequest,
-        ILogger logger)
+        ILogger logger,
+        StreamStats? stats = null)
     {
         var messageId = $"msg_{Guid.NewGuid():N}";
         var responseModel = originalRequest.OriginalModel ?? originalRequest.Model;
 
-        yield return EmitMessageStart(messageId, responseModel);
-        yield return EmitContentBlockStart(0, new { type = "text", text = string.Empty });
-        yield return EmitEvent("ping", new { type = "ping" });
+        logger.LogInformation("Streaming start messageId={MessageId} model={Model}", messageId, responseModel);
+
+        stats ??= new StreamStats();
+        // Match old/server.py behavior: for synthesized streams (e.g. Azure Responses bridged to a single chunk)
+        // we already know usage before sending message_start; for regular streams usage is typically unknown.
+        await using var enumerator = responseStream.GetAsyncEnumerator();
 
         int? toolIndex = null;
         var accumulatedText = string.Empty;
@@ -114,8 +129,38 @@ public static class SseStreaming
         var hasSentStopReason = false;
         var lastToolIndex = 0;
 
-        await foreach (var chunk in responseStream)
+        if (!await enumerator.MoveNextAsync())
         {
+            yield return EmitMessageStart(messageId, responseModel, 0, 0);
+            yield return EmitContentBlockStart(0, new { type = "text", text = string.Empty });
+            yield return EmitEvent("ping", new { type = "ping" });
+            yield return EmitMessageDelta("end_turn", 0);
+            yield return EmitMessageStop();
+            yield return "data: [DONE]\n\n";
+
+            stats.EventCount += 6;
+            stats.StopReason = "end_turn";
+            logger.LogInformation(
+                "Streaming ended without chunks messageId={MessageId} chunks=0 events={EventCount}",
+                messageId,
+                stats.EventCount);
+            yield break;
+        }
+
+        var firstChunk = enumerator.Current;
+        UpdateUsage(firstChunk, ref inputTokens, ref outputTokens);
+
+        yield return EmitMessageStart(messageId, responseModel, inputTokens, outputTokens);
+        yield return EmitContentBlockStart(0, new { type = "text", text = string.Empty });
+        yield return EmitEvent("ping", new { type = "ping" });
+
+        stats.EventCount += 3;
+
+        // Process the first chunk we already pulled, then continue with the remaining stream.
+        foreach (var chunk in new[] { firstChunk })
+        {
+            stats.ChunkCount += 1;
+
             List<string> events;
             try
             {
@@ -128,14 +173,16 @@ public static class SseStreaming
                     ref inputTokens,
                     ref outputTokens,
                     ref hasSentStopReason,
-                    ref lastToolIndex);
+                    ref lastToolIndex,
+                    stats);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Error processing stream chunk");
-                continue;
+                logger.LogError(ex, "Error processing stream chunk messageId={MessageId} chunkCount={ChunkCount}", messageId, stats.ChunkCount);
+                events = new List<string>();
             }
 
+            stats.EventCount += events.Count;
             foreach (var evt in events)
             {
                 yield return evt;
@@ -143,13 +190,68 @@ public static class SseStreaming
 
             if (hasSentStopReason)
             {
+                logger.LogInformation(
+                    "Streaming completed messageId={MessageId} stopReason={StopReason} inputTokens={InputTokens} outputTokens={OutputTokens} chunks={ChunkCount} events={EventCount}",
+                    messageId,
+                    stats.StopReason ?? "(unknown)",
+                    stats.InputTokens,
+                    stats.OutputTokens,
+                    stats.ChunkCount,
+                    stats.EventCount);
+                yield break;
+            }
+        }
+
+        while (await enumerator.MoveNextAsync())
+        {
+            var chunk = enumerator.Current;
+            stats.ChunkCount += 1;
+
+            List<string> events;
+            try
+            {
+                events = ProcessStreamChunk(
+                    chunk,
+                    ref toolIndex,
+                    ref accumulatedText,
+                    ref textSent,
+                    ref textBlockClosed,
+                    ref inputTokens,
+                    ref outputTokens,
+                    ref hasSentStopReason,
+                    ref lastToolIndex,
+                    stats);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Error processing stream chunk messageId={MessageId} chunkCount={ChunkCount}", messageId, stats.ChunkCount);
+                continue;
+            }
+
+            stats.EventCount += events.Count;
+            foreach (var evt in events)
+            {
+                yield return evt;
+            }
+
+            if (hasSentStopReason)
+            {
+                logger.LogInformation(
+                    "Streaming completed messageId={MessageId} stopReason={StopReason} inputTokens={InputTokens} outputTokens={OutputTokens} chunks={ChunkCount} events={EventCount}",
+                    messageId,
+                    stats.StopReason ?? "(unknown)",
+                    stats.InputTokens,
+                    stats.OutputTokens,
+                    stats.ChunkCount,
+                    stats.EventCount);
                 yield break;
             }
         }
 
         if (!hasSentStopReason)
         {
-            foreach (var evt in CloseOpenBlocks(toolIndex, lastToolIndex, textBlockClosed, accumulatedText, textSent))
+            var remainingEvents = CloseOpenBlocks(toolIndex, lastToolIndex, textBlockClosed, accumulatedText, textSent).ToList();
+            foreach (var evt in remainingEvents)
             {
                 yield return evt;
             }
@@ -157,6 +259,20 @@ public static class SseStreaming
             yield return EmitMessageDelta("end_turn", outputTokens);
             yield return EmitMessageStop();
             yield return "data: [DONE]\n\n";
+
+            stats.EventCount += remainingEvents.Count + 3;
+            stats.OutputCharacters = accumulatedText.Length;
+            stats.InputTokens = inputTokens;
+            stats.OutputTokens = outputTokens;
+            stats.StopReason = "end_turn";
+
+            logger.LogInformation(
+                "Streaming ended without finish_reason messageId={MessageId} inputTokens={InputTokens} outputTokens={OutputTokens} chunks={ChunkCount} events={EventCount}",
+                messageId,
+                stats.InputTokens,
+                stats.OutputTokens,
+                stats.ChunkCount,
+                stats.EventCount);
         }
     }
 
@@ -381,11 +497,14 @@ public static class SseStreaming
         ref int inputTokens,
         ref int outputTokens,
         ref bool hasSentStopReason,
-        ref int lastToolIndex)
+        ref int lastToolIndex,
+        StreamStats stats)
     {
         var events = new List<string>();
 
         UpdateUsage(chunk, ref inputTokens, ref outputTokens);
+        stats.InputTokens = inputTokens;
+        stats.OutputTokens = outputTokens;
 
         var (delta, finishReason) = GetDeltaPayload(chunk);
         if (delta is null)
@@ -399,6 +518,7 @@ public static class SseStreaming
         if (!string.IsNullOrEmpty(deltaContent))
         {
             accumulatedText += deltaContent;
+            stats.OutputCharacters = accumulatedText.Length;
             if (toolIndex is null && !textBlockClosed)
             {
                 textSent = true;
@@ -444,6 +564,7 @@ public static class SseStreaming
             events.AddRange(CloseOpenBlocks(toolIndex, lastToolIndex, textBlockClosed, accumulatedText, textSent));
 
             var stopReason = MapStopReason(finishReason);
+            stats.StopReason = stopReason;
             events.Add(EmitMessageDelta(stopReason, outputTokens));
             events.Add(EmitMessageStop());
             events.Add("data: [DONE]\n\n");

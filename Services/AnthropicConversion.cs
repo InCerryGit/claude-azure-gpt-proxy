@@ -1,9 +1,9 @@
 using System.Text.Json;
-using ClaudeCodeAzureGptProxy.Infrastructure;
-using ClaudeCodeAzureGptProxy.Models;
+using ClaudeAzureGptProxy.Infrastructure;
+using ClaudeAzureGptProxy.Models;
 using Microsoft.Extensions.Logging;
 
-namespace ClaudeCodeAzureGptProxy.Services;
+namespace ClaudeAzureGptProxy.Services;
 
 public static class AnthropicConversion
 {

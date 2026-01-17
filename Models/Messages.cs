@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace ClaudeCodeAzureGptProxy.Models;
+namespace ClaudeAzureGptProxy.Models;
 
 public sealed record ContentBlockText
 {

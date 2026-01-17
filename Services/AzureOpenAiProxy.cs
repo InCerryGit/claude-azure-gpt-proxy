@@ -1,16 +1,17 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Linq;
-using ClaudeCodeAzureGptProxy.Infrastructure;
-using ClaudeCodeAzureGptProxy.Models;
+using ClaudeAzureGptProxy.Infrastructure;
+using ClaudeAzureGptProxy.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OpenAI.Chat;
 using OpenAI;
 
-namespace ClaudeCodeAzureGptProxy.Services;
+namespace ClaudeAzureGptProxy.Services;
 
 public sealed class AzureOpenAiProxy
 {
@@ -33,13 +34,30 @@ public sealed class AzureOpenAiProxy
 
     public async Task<object> SendAsync(MessagesRequest request, CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var payload = AnthropicConversion.ConvertAnthropicToAzure(request, _logger, _azureOptions);
         request.ResolvedAzureModel ??= payload["model"]?.ToString();
         NormalizeOpenAiMessages(payload);
 
-        if (IsResponsesModel(payload))
+        var isResponses = IsResponsesModel(payload);
+        _logger.LogInformation(
+            "Azure request start model={Model} responses={IsResponses} messages={MessageCount} tools={ToolCount}",
+            request.ResolvedAzureModel ?? request.Model,
+            isResponses,
+            request.Messages.Count,
+            request.Tools?.Count ?? 0);
+
+        using var scope = _logger.BeginScope(new Dictionary<string, object?>
         {
-            return await SendResponsesAsync(payload, cancellationToken);
+            ["azureModel"] = request.ResolvedAzureModel ?? request.Model,
+            ["azureResponses"] = isResponses
+        });
+
+        if (isResponses)
+        {
+            var responsePayload = await SendResponsesAsync(payload, cancellationToken);
+            _logger.LogInformation("Azure responses completed elapsedMs={ElapsedMs}", stopwatch.ElapsedMilliseconds);
+            return responsePayload;
         }
 
         var client = _clientFactory.CreateClient();
@@ -48,8 +66,24 @@ public sealed class AzureOpenAiProxy
         var messages = BuildChatMessages(payload);
         var options = BuildChatOptions(payload);
 
+        _logger.LogInformation(
+            "Azure chat request deployment={Deployment} maxTokens={MaxTokens} temperature={Temperature} topP={TopP} tools={ToolCount}",
+            deployment,
+            options.MaxOutputTokenCount,
+            options.Temperature,
+            options.TopP,
+            options.Tools.Count);
+
         var chatClient = client.GetChatClient(deployment);
         var response = await chatClient.CompleteChatAsync(messages, options, cancellationToken);
+        _logger.LogInformation(
+            "Azure chat completed deployment={Deployment} finishReason={FinishReason} inputTokens={InputTokens} outputTokens={OutputTokens} elapsedMs={ElapsedMs}",
+            deployment,
+            response.Value.FinishReason.ToString().ToLowerInvariant(),
+            response.Value.Usage.InputTokenCount,
+            response.Value.Usage.OutputTokenCount,
+            stopwatch.ElapsedMilliseconds);
+
         return ConvertChatResponse(response.Value);
     }
 
@@ -57,13 +91,29 @@ public sealed class AzureOpenAiProxy
         MessagesRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var payload = AnthropicConversion.ConvertAnthropicToAzure(request, _logger, _azureOptions);
         request.ResolvedAzureModel ??= payload["model"]?.ToString();
         NormalizeOpenAiMessages(payload);
 
-        if (IsResponsesModel(payload))
+        var isResponses = IsResponsesModel(payload);
+        _logger.LogInformation(
+            "Azure stream start model={Model} responses={IsResponses} messages={MessageCount} tools={ToolCount}",
+            request.ResolvedAzureModel ?? request.Model,
+            isResponses,
+            request.Messages.Count,
+            request.Tools?.Count ?? 0);
+
+        using var scope = _logger.BeginScope(new Dictionary<string, object?>
+        {
+            ["azureModel"] = request.ResolvedAzureModel ?? request.Model,
+            ["azureResponses"] = isResponses
+        });
+
+        if (isResponses)
         {
             var responsePayload = await SendResponsesAsync(payload, cancellationToken);
+            _logger.LogInformation("Azure responses stream synth completed elapsedMs={ElapsedMs}", stopwatch.ElapsedMilliseconds);
             var synthesized = AnthropicConversion.ConvertAzureToAnthropic(responsePayload, request, _logger);
             var chunk = BuildStreamChunkFromAnthropic(synthesized);
             yield return chunk;
@@ -75,6 +125,14 @@ public sealed class AzureOpenAiProxy
 
         var messages = BuildChatMessages(payload);
         var options = BuildChatOptions(payload);
+
+        _logger.LogInformation(
+            "Azure chat stream request deployment={Deployment} maxTokens={MaxTokens} temperature={Temperature} topP={TopP} tools={ToolCount}",
+            deployment,
+            options.MaxOutputTokenCount,
+            options.Temperature,
+            options.TopP,
+            options.Tools.Count);
 
         var chatClient = client.GetChatClient(deployment);
         await foreach (var update in chatClient.CompleteChatStreamingAsync(messages, options, cancellationToken))
@@ -112,6 +170,8 @@ public sealed class AzureOpenAiProxy
 
             yield return chunk;
         }
+
+        _logger.LogInformation("Azure chat stream completed deployment={Deployment} elapsedMs={ElapsedMs}", deployment, stopwatch.ElapsedMilliseconds);
     }
 
     private async Task<JsonElement> SendResponsesAsync(
@@ -129,9 +189,52 @@ public sealed class AzureOpenAiProxy
             throw new InvalidOperationException("AZURE_OPENAI_API_KEY is required for responses.");
         }
 
+        var requestPayload = BuildResponsesRequestPayload(payload, stream: false);
+
+        LogResponsesRequest(requestPayload, endpoint);
+
+        using var httpClient = new HttpClient();
+        using var requestMessage = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _rawOptions.ApiKey);
+        requestMessage.Headers.TryAddWithoutValidation("api-key", _rawOptions.ApiKey);
+        requestMessage.Content = new StringContent(
+            JsonSerializer.Serialize(requestPayload),
+            Encoding.UTF8,
+            "application/json");
+
+        var stopwatch = Stopwatch.StartNew();
+        using var response = await httpClient.SendAsync(requestMessage, cancellationToken);
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogError(
+                "Azure responses request failed status={StatusCode} reason={Reason} bodyLength={BodyLength} elapsedMs={ElapsedMs}",
+                (int)response.StatusCode,
+                response.ReasonPhrase ?? string.Empty,
+                responseText.Length,
+                stopwatch.ElapsedMilliseconds);
+            throw new InvalidOperationException(
+                $"Azure OpenAI responses request failed: {(int)response.StatusCode} {response.ReasonPhrase}. {responseText}");
+        }
+
+        _logger.LogInformation(
+            "Azure responses request completed status={StatusCode} bodyLength={BodyLength} elapsedMs={ElapsedMs}",
+            (int)response.StatusCode,
+            responseText.Length,
+            stopwatch.ElapsedMilliseconds);
+
+        using var doc = JsonDocument.Parse(responseText);
+        return doc.RootElement.Clone();
+    }
+
+
+    private Dictionary<string, object?> BuildResponsesRequestPayload(
+        Dictionary<string, object?> payload,
+        bool stream)
+    {
         var requestPayload = new Dictionary<string, object?>(payload)
         {
-            ["stream"] = false
+            ["stream"] = stream
         };
 
         if (requestPayload.TryGetValue("messages", out var messagesObj))
@@ -170,7 +273,11 @@ public sealed class AzureOpenAiProxy
         }
 
         NormalizeResponsesTools(requestPayload);
+        return requestPayload;
+    }
 
+    private void LogResponsesRequest(Dictionary<string, object?> requestPayload, string endpoint)
+    {
         if (requestPayload.TryGetValue("tools", out var toolsPayload) && toolsPayload is IEnumerable<object> toolsList)
         {
             _logger.LogInformation("Azure responses tools count: {Count}", toolsList.Count());
@@ -185,27 +292,8 @@ public sealed class AzureOpenAiProxy
             "Azure responses request: endpoint={Endpoint}, model={Model}",
             endpoint,
             requestPayload.TryGetValue("model", out var resolvedModel) ? resolvedModel : "(missing)");
-
-        using var httpClient = new HttpClient();
-        using var requestMessage = new HttpRequestMessage(HttpMethod.Post, endpoint);
-        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _rawOptions.ApiKey);
-        requestMessage.Headers.TryAddWithoutValidation("api-key", _rawOptions.ApiKey);
-        requestMessage.Content = new StringContent(
-            JsonSerializer.Serialize(requestPayload),
-            Encoding.UTF8,
-            "application/json");
-
-        using var response = await httpClient.SendAsync(requestMessage, cancellationToken);
-        var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException(
-                $"Azure OpenAI responses request failed: {(int)response.StatusCode} {response.ReasonPhrase}. {responseText}");
-        }
-
-        using var doc = JsonDocument.Parse(responseText);
-        return doc.RootElement.Clone();
     }
+
 
     private static string NormalizeResponsesModel(string model)
     {
@@ -345,7 +433,7 @@ public sealed class AzureOpenAiProxy
                         {
                             if (functionCall.TryGetValue("call_id", out var callIdObj))
                             {
-                                lastFunctionCallId = callIdObj?.ToString();
+                                lastFunctionCallId = callIdObj?.ToString() ?? lastFunctionCallId;
                             }
                             normalized.Add(functionCall);
                         }
@@ -1093,6 +1181,7 @@ public sealed class AzureOpenAiProxy
                 _ => options.ToolChoice
             };
         }
+        
 
         return options;
     }
