@@ -8,7 +8,6 @@ namespace ClaudeAzureGptProxy.Services;
 
 public static class SseStreaming
 {
-    private static readonly Dictionary<int, int> _toolIndexToAnthropicIndex = new();
     public sealed class StreamStats
     {
         public int ChunkCount { get; set; }
@@ -124,7 +123,10 @@ public static class SseStreaming
         // we already know usage before sending message_start; for regular streams usage is typically unknown.
         await using var enumerator = responseStream.GetAsyncEnumerator();
 
-        _toolIndexToAnthropicIndex.Clear();
+        // Per-stream mapping: OpenAI tool call (id preferred, else index) -> Anthropic content block index.
+        // This must be per request; any shared/static map will break concurrent streams.
+        var toolKeyToAnthropicIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        var unknownToolKeySeq = 0;
         int? toolIndex = null;
         var accumulatedText = string.Empty;
         var textSent = false;
@@ -179,6 +181,8 @@ public static class SseStreaming
                     ref outputTokens,
                     ref hasSentStopReason,
                     ref lastToolIndex,
+                    toolKeyToAnthropicIndex,
+                    ref unknownToolKeySeq,
                     stats);
             }
             catch (Exception ex)
@@ -225,6 +229,8 @@ public static class SseStreaming
                     ref outputTokens,
                     ref hasSentStopReason,
                     ref lastToolIndex,
+                    toolKeyToAnthropicIndex,
+                    ref unknownToolKeySeq,
                     stats);
             }
             catch (Exception ex)
@@ -503,6 +509,8 @@ public static class SseStreaming
         ref int outputTokens,
         ref bool hasSentStopReason,
         ref int lastToolIndex,
+        Dictionary<string, int> toolKeyToAnthropicIndex,
+        ref int unknownToolKeySeq,
         StreamStats stats)
     {
         var events = new List<string>();
@@ -556,7 +564,7 @@ public static class SseStreaming
             foreach (var toolCall in toolCalls)
             {
                 var (newToolIndex, newLastToolIndex, createdEvents) = HandleToolDelta(
-                    toolCall, toolIndex, lastToolIndex);
+                    toolCall, toolIndex, lastToolIndex, toolKeyToAnthropicIndex, ref unknownToolKeySeq);
                 toolIndex = newToolIndex;
                 lastToolIndex = newLastToolIndex;
                 events.AddRange(createdEvents);
@@ -633,14 +641,20 @@ public static class SseStreaming
     private static (int? toolIndex, int lastToolIndex, List<string> events) HandleToolDelta(
         object toolCall,
         int? toolIndex,
-        int lastToolIndex)
+        int lastToolIndex,
+        Dictionary<string, int> toolKeyToAnthropicIndex,
+        ref int unknownToolKeySeq)
     {
+        var toolId = ExtractString(toolCall, "id");
+
+        var hasIndex = false;
         var currentIndex = 0;
         if (toolCall is JsonElement element && element.ValueKind == JsonValueKind.Object)
         {
             if (element.TryGetProperty("index", out var indexProp) && indexProp.ValueKind == JsonValueKind.Number)
             {
                 currentIndex = indexProp.GetInt32();
+                hasIndex = true;
             }
         }
         else if (toolCall is IDictionary<string, object?> dict &&
@@ -648,21 +662,29 @@ public static class SseStreaming
                  int.TryParse(indexObj?.ToString(), out var parsed))
         {
             currentIndex = parsed;
+            hasIndex = true;
         }
         else if (toolCall is StreamingChatToolCallUpdate update)
         {
             currentIndex = update.Index;
+            hasIndex = true;
         }
+
+        var toolKey = !string.IsNullOrWhiteSpace(toolId)
+            ? $"id:{toolId}"
+            : hasIndex
+                ? $"index:{currentIndex}"
+                : $"unknown:{++unknownToolKeySeq}";
 
         var createdEvents = new List<string>();
 
         // Anthropic expects that tool_use input_json_delta uses the same content block index
         // across multiple chunks. We map each OpenAI tool call index -> Anthropic content block index.
         // This avoids only emitting the first partial args chunk.
-        if (_toolIndexToAnthropicIndex.TryGetValue(currentIndex, out var existingAnthropicIndex))
+        if (toolKeyToAnthropicIndex.TryGetValue(toolKey, out var existingAnthropicIndex))
         {
-            // Keep toolIndex pointing at the most recently seen tool index.
-            toolIndex = currentIndex;
+            // Any tool delta means we're now in tool mode (value doesn't matter, only null/non-null).
+            toolIndex = 0;
 
             var argumentsRawExisting = ExtractField(ExtractField(toolCall, "function"), "arguments");
             if (argumentsRawExisting is not null)
@@ -678,19 +700,19 @@ public static class SseStreaming
             return (toolIndex, lastToolIndex, createdEvents);
         }
 
-        toolIndex = currentIndex;
+        toolIndex = 0;
         lastToolIndex += 1;
         var anthropicToolIndex = lastToolIndex;
-        _toolIndexToAnthropicIndex[currentIndex] = anthropicToolIndex;
+        toolKeyToAnthropicIndex[toolKey] = anthropicToolIndex;
 
         var function = ExtractField(toolCall, "function");
         var name = ExtractString(function, "name") ?? string.Empty;
-        var toolId = ExtractString(toolCall, "id") ?? $"toolu_{Guid.NewGuid():N}";
+        var stableToolId = ExtractString(toolCall, "id") ?? $"toolu_{Guid.NewGuid():N}";
 
         createdEvents.Add(EmitContentBlockStart(anthropicToolIndex, new
         {
             type = "tool_use",
-            id = toolId,
+            id = stableToolId,
             name,
             input = new Dictionary<string, object?>()
         }));

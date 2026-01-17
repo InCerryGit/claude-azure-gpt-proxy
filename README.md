@@ -1,95 +1,94 @@
-# Claude Code Azure GPT Proxy
+# Claude Code Azure GPT Proxy ([中文](./README.zh-CN.md))
 
-> **简要说明**
-> 该项目用于将 Anthropic Claude Code 的 Messages API 请求代理到 Azure OpenAI `chat/completions` 端点，并在响应侧转换回 Anthropic 兼容格式（支持 SSE 流式响应与工具调用）。
-
----
-
-## 🚀 功能简介
-
-- **协议适配**：将 Anthropic Messages API 请求转换为 Azure OpenAI Chat/Responses 请求格式
-- **响应转换**：将 Azure OpenAI 响应重新映射为 Anthropic Messages 格式
-- **SSE 流式支持**：支持 `message_start / content_block_delta / message_stop` 事件流
-- **Tool 调用支持**：支持 tool_use / tool_result
-- **Token 统计支持**：支持 `/v1/messages/count_tokens` 本地估算
+> **Summary**
+> This project proxies Anthropic Claude Code Messages API requests to Azure OpenAI `chat/completions` (and Responses where applicable), and converts responses back to Anthropic-compatible format. It supports SSE streaming and tool calls.
 
 ---
 
-## 🏃‍♂️ 本地运行
+## Features
 
-### 1. 准备环境变量
+- **Protocol adaptation**: Convert Anthropic Messages API to Azure OpenAI Chat/Responses requests
+- **Response conversion**: Map Azure OpenAI responses back to Anthropic Messages format
+- **SSE streaming**: `message_start / content_block_delta / message_stop` events
+- **Tool calls**: `tool_use / tool_result` support
+- **Token counting**: `/v1/messages/count_tokens` local estimation
 
-复制 `.env.sample` 为 `.env` 并按需填写：
+---
+
+## Run locally
+
+### 1. Prepare environment variables
+
+Copy `.env.sample` to `.env` and fill in values:
 
 ```bash
 copy .env.sample .env
 ```
 
-### 2. 运行服务
+### 2. Start the service
 
 ```bash
 # Windows (PowerShell)
 ./start.ps1
 ```
 
-默认监听地址取决于 `ASPNETCORE_URLS`，启动日志会输出监听地址。
+The listening address is determined by `ASPNETCORE_URLS`. The startup log prints the final URL(s).
 
-> 说明：`start.ps1` 会读取 `.env` 并设置进程级环境变量。
+> Note: `start.ps1` loads `.env` and sets process-level environment variables.
 
 ---
 
-## 📦 Docker 构建与运行
+## Docker build and run
 
-### 1. 构建镜像
+### 1. Build image
 
 ```bash
 docker build -t claude-azure-gpt-proxy .
 ```
 
-### 2. 准备环境变量
+### 2. Prepare environment variables
 
-复制 `.env.sample` 为 `.env` 并按需填写：
+Copy `.env.sample` to `.env` and fill in values:
 
 ```bash
 copy .env.sample .env
 ```
 
-### 3. 运行容器
+### 3. Run container
 
 ```bash
-docker run --rm -p 8080:8080 --env-file .env \
-  claude-azure-gpt-proxy
+docker run -d --name claude-azure-gpt-proxy --env-file .env -p 8088:8080 claude-azure-gpt-proxy:latest
 ```
 
 ---
 
-## ⚙️ 环境变量
+## Environment variables
 
-| 变量名 | 说明 |
-|--------|------|
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI 资源端点（必填） |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI Key（必填） |
-| `AZURE_API_VERSION` | API 版本（如 `2024-10-21`）|
-| `ANTHROPIC_AUTH_TOKEN` | 若设置，则 `/v1/messages*` 需要 Bearer Token |
-| `SMALL_MODEL` | 小模型部署名（默认用于 haiku）|
-| `BIG_MODEL` | 大模型部署名（默认用于 sonnet/opus）|
+| Name | Description |
+|------|-------------|
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint (required) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key (required) |
+| `AZURE_API_VERSION` | API version (e.g. `2024-10-21`) |
+| `ANTHROPIC_AUTH_TOKEN` | If set, `/v1/messages*` requires Bearer token |
+| `SMALL_MODEL` | Small model deployment name (default for haiku) |
+| `BIG_MODEL` | Large model deployment name (default for sonnet/opus) |
 
 ---
 
-## 🔌 接口说明
+## API
 
 ### `POST /v1/messages`
 
-- Anthropic Messages API 兼容
-- 支持 `stream=true` SSE
+- Anthropic Messages API compatible
+- Supports `stream=true` SSE
 
 ### `POST /v1/messages/count_tokens`
 
-- 本地估算 token 数量
-- 不触发真实生成
+- Local token estimation
+- Does not trigger generation
 
 ---
 
-## 🔒 License
+## License
 
 MIT
