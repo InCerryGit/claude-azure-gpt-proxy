@@ -207,6 +207,13 @@ static async Task<IResult> HandleCursorChatCompletions(
             break;
         }
 
+        if (logger.IsEnabled(LogLevel.Debug) && debugSseCount < debugSseMax)
+        {
+            var singleLine = line.Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal);
+            logger.LogDebug("cursor_upstream_line[{Index}] {Line}", debugSseCount, singleLine);
+        }
+
         foreach (var data in decoder.PushLine(line))
         {
             foreach (var sse in adapter.ConvertAzureSseDataToOpenAiSse(data))
