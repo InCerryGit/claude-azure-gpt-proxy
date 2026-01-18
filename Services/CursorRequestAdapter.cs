@@ -232,12 +232,12 @@ public static class CursorRequestAdapter
                         if (imageUrl.ValueKind == JsonValueKind.String)
                         {
                             var url = imageUrl.GetString();
-                            WriteImageUrlOrBase64(writer, url);
+                            WriteImageUrl(writer, url);
                         }
                         else if (imageUrl.ValueKind == JsonValueKind.Object && imageUrl.TryGetProperty("url", out var urlValue))
                         {
                             var url = urlValue.GetString();
-                            WriteImageUrlOrBase64(writer, url);
+                            WriteImageUrl(writer, url);
                         }
                     }
                     else if (part.TryGetProperty("image_base64", out var imageBase64))
@@ -247,7 +247,7 @@ public static class CursorRequestAdapter
                     }
                     else if (part.TryGetProperty("url", out var url))
                     {
-                        WriteImageUrlOrBase64(writer, url.GetString());
+                        WriteImageUrl(writer, url.GetString());
                     }
 
                     writer.WriteEndObject();
@@ -269,25 +269,11 @@ public static class CursorRequestAdapter
         writer.WriteEndArray();
     }
 
-    private static void WriteImageUrlOrBase64(Utf8JsonWriter writer, string? url)
+    private static void WriteImageUrl(Utf8JsonWriter writer, string? url)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
             return;
-        }
-
-        const string dataPrefix = "data:";
-        const string base64Marker = ";base64,";
-
-        if (url.StartsWith(dataPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            var idx = url.IndexOf(base64Marker, StringComparison.OrdinalIgnoreCase);
-            if (idx >= 0)
-            {
-                var base64 = url[(idx + base64Marker.Length)..];
-                writer.WriteString("image_base64", base64);
-                return;
-            }
         }
 
         writer.WriteString("image_url", url);
