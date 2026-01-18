@@ -288,11 +288,13 @@ static string SummarizeCursorContent(JsonElement content)
                 {
                     if (imageUrl.ValueKind == JsonValueKind.String)
                     {
-                        parts.Add("image_url:string");
+                        var url = imageUrl.GetString() ?? string.Empty;
+                        parts.Add($"image_url:string({Shorten(url)})");
                     }
                     else if (imageUrl.ValueKind == JsonValueKind.Object && imageUrl.TryGetProperty("url", out _))
                     {
-                        parts.Add("image_url:object(url)");
+                        var url = imageUrl.TryGetProperty("url", out var urlProp) ? urlProp.GetString() ?? string.Empty : string.Empty;
+                        parts.Add($"image_url:object(url={Shorten(url)})");
                     }
                     else
                     {
@@ -315,7 +317,18 @@ static string SummarizeCursorContent(JsonElement content)
                 }
                 else if (part.TryGetProperty("image_url", out var imageUrlProp))
                 {
-                    parts.Add($"input_image:image_url({imageUrlProp.ValueKind})");
+                    if (imageUrlProp.ValueKind == JsonValueKind.String)
+                    {
+                        parts.Add($"input_image:image_url({Shorten(imageUrlProp.GetString() ?? string.Empty)})");
+                    }
+                    else if (imageUrlProp.ValueKind == JsonValueKind.Object && imageUrlProp.TryGetProperty("url", out var urlProp))
+                    {
+                        parts.Add($"input_image:image_url(url={Shorten(urlProp.GetString() ?? string.Empty)})");
+                    }
+                    else
+                    {
+                        parts.Add($"input_image:image_url({imageUrlProp.ValueKind})");
+                    }
                 }
                 else
                 {
@@ -338,6 +351,17 @@ static string SummarizeCursorContent(JsonElement content)
     }
 
     return content.ValueKind.ToString();
+}
+
+static string Shorten(string value)
+{
+    const int maxLen = 120;
+    if (string.IsNullOrEmpty(value))
+    {
+        return string.Empty;
+    }
+
+    return value.Length <= maxLen ? value : value[..maxLen] + "...";
 }
 
 
