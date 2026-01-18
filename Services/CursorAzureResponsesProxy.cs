@@ -43,6 +43,11 @@ public sealed class CursorAzureResponsesProxy
         request.Headers.TryAddWithoutValidation("api-key", _rawOptions.ApiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
+            _logger.LogDebug("cursor_azure_responses_raw_request {Request}", responsesRequestBody.RootElement.GetRawText());
+        }
+
         request.Content = new StringContent(
             responsesRequestBody.RootElement.GetRawText(),
             Encoding.UTF8,
