@@ -1193,6 +1193,11 @@ public static class AnthropicConversion
     {
         if (usage is JsonElement element && element.ValueKind == JsonValueKind.Object)
         {
+            // Azure/OpenAI usage shapes vary:
+            // - Chat Completions: {prompt_tokens, completion_tokens, total_tokens}
+            // - Responses: {input_tokens, output_tokens}
+            // Some SDKs/proxies may omit one side; we try to recover from total_tokens when possible.
+
             var inputTokens = element.TryGetProperty("prompt_tokens", out var prompt)
                 ? prompt.GetInt32()
                 : element.TryGetProperty("input_tokens", out var input)
@@ -1205,12 +1210,45 @@ public static class AnthropicConversion
                     ? output.GetInt32()
                     : 0;
 
+            // Azure Responses may include cached token counts under input_tokens_details.cached_tokens.
+            // We map this to Anthropic's cache_read_input_tokens (best-effort).
+            var cacheReadInputTokens = 0;
+            if (element.TryGetProperty("input_tokens_details", out var inputDetails) &&
+                inputDetails.ValueKind == JsonValueKind.Object &&
+                inputDetails.TryGetProperty("cached_tokens", out var cachedTokensProp) &&
+                cachedTokensProp.ValueKind == JsonValueKind.Number)
+            {
+                cacheReadInputTokens = cachedTokensProp.GetInt32();
+            }
+
+            if (inputTokens == 0 && outputTokens > 0 &&
+                element.TryGetProperty("total_tokens", out var total) &&
+                total.ValueKind == JsonValueKind.Number)
+            {
+                var totalTokens = total.GetInt32();
+                // Best-effort: if only total is provided, attribute the remainder to input.
+                inputTokens = Math.Max(0, totalTokens - outputTokens);
+            }
+
+            if (outputTokens == 0 && inputTokens > 0 &&
+                element.TryGetProperty("total_tokens", out var total2) &&
+                total2.ValueKind == JsonValueKind.Number)
+            {
+                var totalTokens = total2.GetInt32();
+                outputTokens = Math.Max(0, totalTokens - inputTokens);
+            }
+
             return new Usage
             {
+                CacheCreation = new Dictionary<string, object?>
+                {
+                    ["ephemeral_5m_input_tokens"] = 0,
+                    ["ephemeral_1h_input_tokens"] = 0
+                },
                 InputTokens = inputTokens,
                 OutputTokens = outputTokens,
                 CacheCreationInputTokens = 0,
-                CacheReadInputTokens = 0
+                CacheReadInputTokens = cacheReadInputTokens
             };
         }
 
@@ -1228,17 +1266,60 @@ public static class AnthropicConversion
                 outputTokens = ExtractInt(dict, "output_tokens");
             }
 
+            var cacheReadInputTokens = 0;
+            if (dict.TryGetValue("input_tokens_details", out var inputDetailsObj) && inputDetailsObj is not null)
+            {
+                if (inputDetailsObj is JsonElement detailsEl && detailsEl.ValueKind == JsonValueKind.Object &&
+                    detailsEl.TryGetProperty("cached_tokens", out var cachedTokensProp) &&
+                    cachedTokensProp.ValueKind == JsonValueKind.Number)
+                {
+                    cacheReadInputTokens = cachedTokensProp.GetInt32();
+                }
+                else if (inputDetailsObj is IDictionary<string, object?> detailsDict)
+                {
+                    cacheReadInputTokens = ExtractInt(detailsDict, "cached_tokens");
+                }
+            }
+
+            if (inputTokens == 0 && outputTokens > 0)
+            {
+                var totalTokens = ExtractInt(dict, "total_tokens");
+                if (totalTokens > 0)
+                {
+                    inputTokens = Math.Max(0, totalTokens - outputTokens);
+                }
+            }
+
+            if (outputTokens == 0 && inputTokens > 0)
+            {
+                var totalTokens = ExtractInt(dict, "total_tokens");
+                if (totalTokens > 0)
+                {
+                    outputTokens = Math.Max(0, totalTokens - inputTokens);
+                }
+            }
+
             return new Usage
             {
+                CacheCreation = new Dictionary<string, object?>
+                {
+                    ["ephemeral_5m_input_tokens"] = 0,
+                    ["ephemeral_1h_input_tokens"] = 0
+                },
                 InputTokens = inputTokens,
                 OutputTokens = outputTokens,
                 CacheCreationInputTokens = 0,
-                CacheReadInputTokens = 0
+                CacheReadInputTokens = cacheReadInputTokens
             };
         }
 
         return new Usage
         {
+            CacheCreation = new Dictionary<string, object?>
+            {
+                ["ephemeral_5m_input_tokens"] = 0,
+                ["ephemeral_1h_input_tokens"] = 0
+            },
             InputTokens = 0,
             OutputTokens = 0,
             CacheCreationInputTokens = 0,

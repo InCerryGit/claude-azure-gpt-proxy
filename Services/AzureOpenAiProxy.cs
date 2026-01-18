@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using System.Text.Encodings.Web;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Linq;
+using System.Security.Cryptography;
 using AzureGptProxy.Models;
 using AzureGptProxy.Infrastructure;
 using Microsoft.Extensions.Logging;
@@ -426,6 +428,15 @@ public sealed class AzureOpenAiProxy
             requestPayload["max_output_tokens"] = maxTokens;
         }
 
+        // Prefer metadata.user_id for prompt caching.
+        // Claude Code forwards a stable per-session identifier via metadata.user_id.
+        // This proxy uses it as Azure Responses prompt_cache_key for request-level caching.
+        if (TryGetPromptCacheKeyFromMetadata(requestPayload, out var promptCacheKey) &&
+            !string.IsNullOrWhiteSpace(promptCacheKey))
+        {
+            requestPayload["prompt_cache_key"] = promptCacheKey;
+        }
+
         var legacyTokenKeys = requestPayload.Keys
             .Where(key => string.Equals(key, "max_completion_tokens", StringComparison.OrdinalIgnoreCase))
             .ToList();
@@ -446,6 +457,77 @@ public sealed class AzureOpenAiProxy
             requestPayload.Remove("top_k");
         }
         return requestPayload;
+    }
+
+    private static bool TryGetPromptCacheKeyFromMetadata(
+        IDictionary<string, object?> requestPayload,
+        out string? promptCacheKey)
+    {
+        promptCacheKey = null;
+
+        if (!requestPayload.TryGetValue("metadata", out var metadataObj) || metadataObj is null)
+        {
+            return false;
+        }
+
+        // metadata may be Dictionary<string, object?> or JsonElement depending on conversion path.
+        if (metadataObj is JsonElement element)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (!element.TryGetProperty("user_id", out var userIdProp))
+            {
+                return false;
+            }
+
+            var raw = userIdProp.ValueKind == JsonValueKind.String
+                ? userIdProp.GetString()
+                : userIdProp.GetRawText();
+            promptCacheKey = NormalizePromptCacheKey(raw);
+            return !string.IsNullOrWhiteSpace(promptCacheKey);
+        }
+
+        if (metadataObj is IDictionary<string, object?> dict)
+        {
+            if (!dict.TryGetValue("user_id", out var userIdObj) || userIdObj is null)
+            {
+                return false;
+            }
+
+            var raw = userIdObj switch
+            {
+                JsonElement userIdEl when userIdEl.ValueKind == JsonValueKind.String => userIdEl.GetString(),
+                _ => userIdObj.ToString()
+            };
+
+            promptCacheKey = NormalizePromptCacheKey(raw);
+            return !string.IsNullOrWhiteSpace(promptCacheKey);
+        }
+
+        return false;
+    }
+
+    private static string? NormalizePromptCacheKey(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        // Azure Responses enforces prompt_cache_key max length (currently 64).
+        // We keep stable mapping by hashing long identifiers (e.g. Claude Code user/session ids).
+        if (raw.Length <= 64)
+        {
+            return raw;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(raw);
+        var hash = SHA256.HashData(bytes);
+        // 32 bytes => 64 hex chars.
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private static void NormalizeResponsesToolChoice(Dictionary<string, object?> requestPayload)
@@ -1057,6 +1139,16 @@ public sealed class AzureOpenAiProxy
             "Azure responses request: endpoint={Endpoint}, model={Model}",
             endpoint,
             requestPayload.TryGetValue("model", out var resolvedModel) ? resolvedModel : "(missing)");
+
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
+            var jsonOptions = new JsonSerializerOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            var requestJson = JsonSerializer.Serialize(requestPayload, jsonOptions);
+            _logger.LogDebug("Azure responses request payload: {RequestPayload}", requestJson);
+        }
     }
 
 

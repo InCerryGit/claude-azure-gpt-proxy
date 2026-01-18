@@ -226,6 +226,11 @@ public sealed record TokenCountResponse
 
 public sealed record Usage
 {
+    // cache_creation is part of the official Anthropic Usage shape.
+    // We provide it to improve compatibility with clients that expect the nested breakdown.
+    [JsonPropertyName("cache_creation")]
+    public Dictionary<string, object?>? CacheCreation { get; init; }
+
     [JsonPropertyName("input_tokens")]
     public int InputTokens { get; init; }
 

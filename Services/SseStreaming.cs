@@ -47,6 +47,8 @@ public static class SseStreaming
         Dictionary<int, ToolUseAggregate> toolAggregates,
         int inputTokens,
         int outputTokens,
+        int cacheReadInputTokens,
+        int cacheCreationInputTokens,
         string? stopReason)
     {
         var content = new List<Dictionary<string, object?>>();
@@ -98,14 +100,20 @@ public static class SseStreaming
             {
                 InputTokens = inputTokens,
                 OutputTokens = outputTokens,
-                CacheCreationInputTokens = 0,
-                CacheReadInputTokens = 0
+                CacheCreationInputTokens = cacheCreationInputTokens,
+                CacheReadInputTokens = cacheReadInputTokens
             }
         };
     }
 
 
-    private static string EmitMessageStart(string messageId, string responseModel, int inputTokens, int outputTokens)
+    private static string EmitMessageStart(
+        string messageId,
+        string responseModel,
+        int inputTokens,
+        int outputTokens,
+        int cacheReadInputTokens,
+        int cacheCreationInputTokens)
     {
         var messageData = new
         {
@@ -122,8 +130,8 @@ public static class SseStreaming
                 usage = new
                 {
                     input_tokens = inputTokens,
-                    cache_creation_input_tokens = 0,
-                    cache_read_input_tokens = 0,
+                    cache_creation_input_tokens = cacheCreationInputTokens,
+                    cache_read_input_tokens = cacheReadInputTokens,
                     output_tokens = outputTokens
                 }
             }
@@ -161,13 +169,24 @@ public static class SseStreaming
         });
     }
 
-    private static string EmitMessageDelta(string stopReason, int outputTokens)
+    private static string EmitMessageDelta(
+        string stopReason,
+        int inputTokens,
+        int outputTokens,
+        int cacheReadInputTokens,
+        int cacheCreationInputTokens)
     {
         return EmitEvent("message_delta", new
         {
             type = "message_delta",
             delta = new { stop_reason = stopReason, stop_sequence = (string?)null },
-            usage = new { output_tokens = outputTokens }
+            usage = new
+            {
+                input_tokens = inputTokens,
+                cache_creation_input_tokens = cacheCreationInputTokens,
+                cache_read_input_tokens = cacheReadInputTokens,
+                output_tokens = outputTokens
+            }
         });
     }
 
@@ -216,15 +235,17 @@ public static class SseStreaming
         var textBlockClosed = false;
         var inputTokens = 0;
         var outputTokens = 0;
+        var cacheReadInputTokens = 0;
+        var cacheCreationInputTokens = 0;
         var hasSentStopReason = false;
         var lastToolIndex = 0;
 
         if (!await enumerator.MoveNextAsync())
         {
-            yield return EmitMessageStart(messageId, responseModel, 0, 0);
+            yield return EmitMessageStart(messageId, responseModel, 0, 0, 0, 0);
             yield return EmitContentBlockStart(0, new { type = "text", text = string.Empty });
             yield return EmitEvent("ping", new { type = "ping" });
-            yield return EmitMessageDelta("end_turn", 0);
+            yield return EmitMessageDelta("end_turn", 0, 0, 0, 0);
             yield return EmitMessageStop();
             yield return "data: [DONE]\n\n";
 
@@ -261,9 +282,15 @@ public static class SseStreaming
         }
 
         var firstChunk = enumerator.Current;
-        UpdateUsage(firstChunk, ref inputTokens, ref outputTokens);
+        UpdateUsage(firstChunk, ref inputTokens, ref outputTokens, ref cacheReadInputTokens);
 
-        yield return EmitMessageStart(messageId, responseModel, inputTokens, outputTokens);
+        yield return EmitMessageStart(
+            messageId,
+            responseModel,
+            inputTokens,
+            outputTokens,
+            cacheReadInputTokens,
+            cacheCreationInputTokens);
         yield return EmitContentBlockStart(0, new { type = "text", text = string.Empty });
         yield return EmitEvent("ping", new { type = "ping" });
 
@@ -287,6 +314,8 @@ public static class SseStreaming
                     ref textBlockClosed,
                     ref inputTokens,
                     ref outputTokens,
+                    ref cacheReadInputTokens,
+                    cacheCreationInputTokens,
                     ref hasSentStopReason,
                     ref lastToolIndex,
                     toolKeyToAnthropicIndex,
@@ -338,6 +367,8 @@ public static class SseStreaming
                     ref textBlockClosed,
                     ref inputTokens,
                     ref outputTokens,
+                    ref cacheReadInputTokens,
+                    cacheCreationInputTokens,
                     ref hasSentStopReason,
                     ref lastToolIndex,
                     toolKeyToAnthropicIndex,
@@ -379,7 +410,7 @@ public static class SseStreaming
                 yield return evt;
             }
 
-            yield return EmitMessageDelta("end_turn", outputTokens);
+            yield return EmitMessageDelta("end_turn", inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens);
             yield return EmitMessageStop();
             yield return "data: [DONE]\n\n";
 
@@ -388,7 +419,17 @@ public static class SseStreaming
             stats.InputTokens = inputTokens;
             stats.OutputTokens = outputTokens;
             stats.StopReason = "end_turn";
-            stats.AggregatedResponse = BuildAggregatedResponse(messageId, responseModel, accumulatedText, toolKeyToAnthropicIndex, toolAggregates, inputTokens, outputTokens, stats.StopReason);
+            stats.AggregatedResponse = BuildAggregatedResponse(
+                messageId,
+                responseModel,
+                accumulatedText,
+                toolKeyToAnthropicIndex,
+                toolAggregates,
+                inputTokens,
+                outputTokens,
+                cacheReadInputTokens,
+                cacheCreationInputTokens,
+                stats.StopReason);
 
             logger.LogInformation(
                 "Streaming ended without finish_reason messageId={MessageId} inputTokens={InputTokens} outputTokens={OutputTokens} chunks={ChunkCount} events={EventCount}",
@@ -420,8 +461,8 @@ public static class SseStreaming
                 usage = new
                 {
                     input_tokens = response.Usage.InputTokens,
-                    cache_creation_input_tokens = 0,
-                    cache_read_input_tokens = 0,
+                    cache_creation_input_tokens = response.Usage.CacheCreationInputTokens,
+                    cache_read_input_tokens = response.Usage.CacheReadInputTokens,
                     output_tokens = response.Usage.OutputTokens
                 }
             }
@@ -459,12 +500,21 @@ public static class SseStreaming
             blockIndex++;
         }
 
-        yield return EmitMessageDelta(response.StopReason ?? "end_turn", response.Usage.OutputTokens);
+        yield return EmitMessageDelta(
+            response.StopReason ?? "end_turn",
+            response.Usage.InputTokens,
+            response.Usage.OutputTokens,
+            response.Usage.CacheReadInputTokens,
+            response.Usage.CacheCreationInputTokens);
         yield return EmitMessageStop();
         yield return "data: [DONE]\n\n";
     }
 
-    private static void UpdateUsage(Dictionary<string, object?> chunk, ref int inputTokens, ref int outputTokens)
+    private static void UpdateUsage(
+        Dictionary<string, object?> chunk,
+        ref int inputTokens,
+        ref int outputTokens,
+        ref int cacheReadInputTokens)
     {
         if (!chunk.TryGetValue("usage", out var usageObj) || usageObj is null)
         {
@@ -473,30 +523,66 @@ public static class SseStreaming
 
         if (usageObj is JsonElement usageElement && usageElement.ValueKind == JsonValueKind.Object)
         {
-            if (usageElement.TryGetProperty("prompt_tokens", out var promptProp))
+            // Chat Completions: {prompt_tokens, completion_tokens}
+            // Responses: {input_tokens, output_tokens}
+            if (usageElement.TryGetProperty("prompt_tokens", out var promptProp) ||
+                usageElement.TryGetProperty("input_tokens", out promptProp))
             {
-                inputTokens = promptProp.GetInt32();
+                if (promptProp.ValueKind == JsonValueKind.Number)
+                {
+                    inputTokens = promptProp.GetInt32();
+                }
             }
 
-            if (usageElement.TryGetProperty("completion_tokens", out var completionProp))
+            if (usageElement.TryGetProperty("completion_tokens", out var completionProp) ||
+                usageElement.TryGetProperty("output_tokens", out completionProp))
             {
-                outputTokens = completionProp.GetInt32();
+                if (completionProp.ValueKind == JsonValueKind.Number)
+                {
+                    outputTokens = completionProp.GetInt32();
+                }
+            }
+
+            if (usageElement.TryGetProperty("input_tokens_details", out var inputDetails) &&
+                inputDetails.ValueKind == JsonValueKind.Object &&
+                inputDetails.TryGetProperty("cached_tokens", out var cachedTokensProp) &&
+                cachedTokensProp.ValueKind == JsonValueKind.Number)
+            {
+                cacheReadInputTokens = cachedTokensProp.GetInt32();
             }
             return;
         }
 
         if (usageObj is IDictionary<string, object?> usageDict)
         {
-            if (usageDict.TryGetValue("prompt_tokens", out var promptVal) &&
+            if ((usageDict.TryGetValue("prompt_tokens", out var promptVal) ||
+                 usageDict.TryGetValue("input_tokens", out promptVal)) &&
                 int.TryParse(promptVal?.ToString(), out var promptParsed))
             {
                 inputTokens = promptParsed;
             }
 
-            if (usageDict.TryGetValue("completion_tokens", out var completionVal) &&
+            if ((usageDict.TryGetValue("completion_tokens", out var completionVal) ||
+                 usageDict.TryGetValue("output_tokens", out completionVal)) &&
                 int.TryParse(completionVal?.ToString(), out var completionParsed))
             {
                 outputTokens = completionParsed;
+            }
+
+            if (usageDict.TryGetValue("input_tokens_details", out var inputDetailsObj) && inputDetailsObj is not null)
+            {
+                if (inputDetailsObj is JsonElement detailsEl && detailsEl.ValueKind == JsonValueKind.Object &&
+                    detailsEl.TryGetProperty("cached_tokens", out var cachedTokensProp) &&
+                    cachedTokensProp.ValueKind == JsonValueKind.Number)
+                {
+                    cacheReadInputTokens = cachedTokensProp.GetInt32();
+                }
+                else if (inputDetailsObj is IDictionary<string, object?> detailsDict &&
+                         detailsDict.TryGetValue("cached_tokens", out var cachedTokensObj) &&
+                         int.TryParse(cachedTokensObj?.ToString(), out var cachedTokens))
+                {
+                    cacheReadInputTokens = cachedTokens;
+                }
             }
         }
     }
@@ -622,6 +708,8 @@ public static class SseStreaming
         ref bool textBlockClosed,
         ref int inputTokens,
         ref int outputTokens,
+        ref int cacheReadInputTokens,
+        int cacheCreationInputTokens,
         ref bool hasSentStopReason,
         ref int lastToolIndex,
         Dictionary<string, int> toolKeyToAnthropicIndex,
@@ -631,7 +719,7 @@ public static class SseStreaming
     {
         var events = new List<string>();
 
-        UpdateUsage(chunk, ref inputTokens, ref outputTokens);
+        UpdateUsage(chunk, ref inputTokens, ref outputTokens, ref cacheReadInputTokens);
         stats.InputTokens = inputTokens;
         stats.OutputTokens = outputTokens;
 
@@ -694,8 +782,18 @@ public static class SseStreaming
 
             var stopReason = MapStopReason(finishReason);
             stats.StopReason = stopReason;
-            stats.AggregatedResponse = BuildAggregatedResponse(messageId, responseModel, accumulatedText, toolKeyToAnthropicIndex, toolAggregates, inputTokens, outputTokens, stopReason);
-            events.Add(EmitMessageDelta(stopReason, outputTokens));
+            stats.AggregatedResponse = BuildAggregatedResponse(
+                messageId,
+                responseModel,
+                accumulatedText,
+                toolKeyToAnthropicIndex,
+                toolAggregates,
+                inputTokens,
+                outputTokens,
+                cacheReadInputTokens,
+                cacheCreationInputTokens,
+                stopReason);
+            events.Add(EmitMessageDelta(stopReason, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens));
             events.Add(EmitMessageStop());
             events.Add("data: [DONE]\n\n");
         }
